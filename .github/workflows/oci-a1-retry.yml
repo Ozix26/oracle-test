@@ -27,6 +27,7 @@ jobs:
       OCI_IMAGE_OCID: ${{ secrets.OCI_IMAGE_OCID }}
       OCI_AD: ${{ secrets.OCI_AD }}
       SSH_PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
+      NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
@@ -37,6 +38,12 @@ jobs:
         run: |
           set -u
           printf '%s\n' "$SSH_PUBLIC_KEY" > key.pub
+
+          notify() {
+            if [ -n "${NTFY_TOPIC:-}" ]; then
+              curl -s -H "Title: $1" -d "$2" "https://ntfy.sh/$NTFY_TOPIC" > /dev/null || true
+            fi
+          }
 
           EXISTING=$(oci compute instance list \
             --compartment-id "$OCI_CLI_TENANCY" \
@@ -54,7 +61,7 @@ jobs:
             --availability-domain "$OCI_AD" \
             --compartment-id "$OCI_CLI_TENANCY" \
             --shape VM.Standard.A1.Flex \
-            --shape-config '{"ocpus":4,"memoryInGBs":24}' \
+            --shape-config '{"ocpus":2,"memoryInGBs":12}' \
             --image-id "$OCI_IMAGE_OCID" \
             --subnet-id "$OCI_SUBNET_OCID" \
             --assign-public-ip true \
@@ -63,6 +70,7 @@ jobs:
             --ssh-authorized-keys-file key.pub 2>&1); then
             echo "Instance créée !"
             echo "$OUT" | grep -E '"(id|lifecycle-state|display-name)"' || true
+            notify "SRV-OZIX créée !" "L'instance Oracle A1 (2 OCPU / 12 Go) est en cours de création. Récupère son IP publique dans la console Oracle."
             gh workflow disable oci-a1-retry
             exit 0
           fi
@@ -74,4 +82,5 @@ jobs:
 
           echo "Erreur inattendue :"
           echo "$OUT"
+          notify "Erreur workflow OCI" "Erreur inattendue, consulte le log GitHub Actions."
           exit 1
