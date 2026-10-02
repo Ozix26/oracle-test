@@ -1,0 +1,77 @@
+name: oci-a1-retry
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: oci-a1
+  cancel-in-progress: false
+
+jobs:
+  launch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      OCI_CLI_USER: ${{ secrets.OCI_USER_OCID }}
+      OCI_CLI_TENANCY: ${{ secrets.OCI_TENANCY_OCID }}
+      OCI_CLI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
+      OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_PRIVATE_KEY }}
+      OCI_CLI_REGION: ${{ secrets.OCI_REGION }}
+      OCI_SUBNET_OCID: ${{ secrets.OCI_SUBNET_OCID }}
+      OCI_IMAGE_OCID: ${{ secrets.OCI_IMAGE_OCID }}
+      OCI_AD: ${{ secrets.OCI_AD }}
+      SSH_PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Installer l'OCI CLI
+        run: pipx install oci-cli
+
+      - name: Tenter de créer l'instance A1.Flex
+        run: |
+          set -u
+          printf '%s\n' "$SSH_PUBLIC_KEY" > key.pub
+
+          EXISTING=$(oci compute instance list \
+            --compartment-id "$OCI_CLI_TENANCY" \
+            --display-name SRV-OZIX \
+            --query 'data[?"lifecycle-state"!=`TERMINATED`]|length(@)' \
+            --raw-output 2>/dev/null || true)
+
+          if [ "${EXISTING:-0}" != "0" ]; then
+            echo "Une instance SRV-OZIX existe déjà : on désactive le workflow."
+            gh workflow disable oci-a1-retry
+            exit 0
+          fi
+
+          if OUT=$(oci compute instance launch \
+            --availability-domain "$OCI_AD" \
+            --compartment-id "$OCI_CLI_TENANCY" \
+            --shape VM.Standard.A1.Flex \
+            --shape-config '{"ocpus":4,"memoryInGBs":24}' \
+            --image-id "$OCI_IMAGE_OCID" \
+            --subnet-id "$OCI_SUBNET_OCID" \
+            --assign-public-ip true \
+            --display-name SRV-OZIX \
+            --boot-volume-size-in-gbs 200 \
+            --ssh-authorized-keys-file key.pub 2>&1); then
+            echo "Instance créée !"
+            echo "$OUT" | grep -E '"(id|lifecycle-state|display-name)"' || true
+            gh workflow disable oci-a1-retry
+            exit 0
+          fi
+
+          if echo "$OUT" | grep -qiE 'out of (host )?capacity|TooManyRequests|InternalError'; then
+            echo "Pas de capacité pour l'instant, nouvel essai au prochain passage."
+            exit 0
+          fi
+
+          echo "Erreur inattendue :"
+          echo "$OUT"
+          exit 1
